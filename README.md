@@ -18,6 +18,14 @@ Keep it outside the database and repository, for example in your hosting environ
 define( 'WSA_SETTINGS_SECRET_KEY', getenv( 'WSA_SETTINGS_SECRET_KEY' ) ?: '' );
 ```
 
+This reads an environment variable; it does not create or populate one. Set that variable in the environment of the PHP process serving WordPress. If your host does not support that, you can instead define the generated key directly in your private, uncommitted `wp-config.php`:
+
+```php
+define( 'WSA_SETTINGS_SECRET_KEY', 'REPLACE_WITH_YOUR_GENERATED_BASE64_KEY' );
+```
+
+Use only one definition, placed before the `wp-settings.php` include. This encryption key is separate from the provider API key you enter in the settings field.
+
 Use a dedicated random key. Do not derive it from WordPress authentication salts, and do not regenerate it on each request. Back it up separately: losing or changing it makes saved credentials unreadable. Key rotation requires decrypting with the old key and re-encrypting with the new one, or replacing every credential. Automated rotation is not included.
 
 Load your existing parent class and then this extension:
@@ -58,7 +66,7 @@ if ( is_wp_error( $key ) || '' === $key ) {
 - Blank or omitted secret fields keep the existing value without re-encrypting it.
 - A new value replaces the credential; spaces, quotes, backslashes, and percent sequences are preserved. The limit is 4096 bytes. Secret fields do not run `sanitize_text_field()` or custom field sanitizers, which could alter credentials.
 - Checking **Delete saved credential** clears it. Submitting deletion and a nonempty replacement together produces an error and keeps the old value.
-- Invalid input or encryption failure keeps the old value and adds a generic settings error. Display `settings_errors()` on the page.
+- Invalid input or encryption failure keeps the old value and adds a settings error explaining known configuration or submission problems. Unexpected exceptions receive a generic notice; exception messages and credentials are never shown. Display `settings_errors()` on the page.
 - Sodium uses XChaCha20-Poly1305 with a fresh random nonce. The authenticated context binds the ciphertext to its site ID, section, and field name. Renaming fields or moving values to another multisite blog requires decrypting and re-encrypting them.
 - Sections containing secrets have option autoload disabled. Settings are not registered for REST exposure; do not enable REST exposure for these option arrays elsewhere.
 - The sanitizer checks the settings group's capability (normally `manage_options`). WordPress `options.php` checks the form nonce. Custom save endpoints must also check their own nonce. Programmatic writes require the appropriate current user and registered settings callbacks; direct database writes bypass this library.
@@ -80,6 +88,15 @@ This protects database-only leaks when the encryption key is stored separately. 
 
 For passwords your application only needs to verify, use password hashing rather than recoverable encryption. WordPress user login passwords should use WordPress's user/password APIs.
 
+## Troubleshooting saves
+
+- An empty input after saving is expected. The status underneath distinguishes an unset field from one with a saved value. Confirm service authentication through `get_secret()`, not the ordinary `get_option()` getter.
+- A notice naming `WSA_SETTINGS_SECRET_KEY` means that the constant is missing or does not decode to 32 bytes. Check the configuration above. Do not replace an existing valid encryption key just to troubleshoot; doing so makes old credentials unreadable.
+- A notice naming Sodium means the PHP process serving WordPress lacks the required encryption function. A working command-line PHP installation does not by itself verify the web runtime.
+- Leave **Delete saved credential** unchecked when entering a replacement.
+- If using a custom form, the input name must be `section[field][value]`; a plain `section[field]` string is not accepted as a replacement. Use the subclass's `callback_secret()` renderer and register it on `admin_init`, including the request to `options.php`.
+- Include `settings_errors( 'your_section_id' )` in the settings-page callback so save errors are visible. Share only the error notice when requesting support, never the credential or encryption key.
+
 ## Tests
 
 The regression suite runs against the real upstream parent class, with lightweight stubs for WordPress APIs. It covers encryption, tampering, field/site binding, rendering, replacement/deletion, malformed input, capabilities, failed saves, ordinary fields, and repeated sanitization.
@@ -88,7 +105,7 @@ The regression suite runs against the real upstream parent class, with lightweig
 php tests/run.php /path/to/upstream/class.settings-api.php
 ```
 
-Validated in this workspace with PHP 8.4.27: all 46 assertions passed and all PHP files passed syntax checks. Disabling Sodium's encryption function also confirmed that encryption fails closed. PHP 8.1 compatibility is based on the language features used; that runtime was not available for execution here.
+Validated in this workspace with PHP 8.4.27: all 53 assertions passed and all PHP files passed syntax checks. Disabling Sodium's encryption function also confirmed that encryption fails closed. PHP 8.1 compatibility is based on the language features used; that runtime was not available for execution here.
 
 The harness is not a full WordPress integration or browser test. Before deploying, verify the settings page on a staging site: save, reload, leave blank, replace, delete, and submit an expired nonce or as an unauthorized user. Confirm database values are ciphertext, secrets are absent from page source, and the service client works. Also verify missing-key behavior and an existing plaintext field's replacement.
 

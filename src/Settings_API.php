@@ -6,6 +6,10 @@ require_once __DIR__ . '/Secret_Cipher.php';
 
 /** Load the original WeDevs_Settings_API class before this file. */
 class Settings_API extends \WeDevs_Settings_API {
+    private const INVALID_INPUT = 1;
+    private const TOO_LONG = 2;
+    private const CONFLICTING_ACTIONS = 3;
+
     private Secret_Cipher $cipher;
 
     /** Exact outputs produced in this request, to support WordPress's repeated sanitization. */
@@ -40,11 +44,31 @@ class Settings_API extends \WeDevs_Settings_API {
         return json_encode( array( get_current_blog_id(), $section, $name ), JSON_THROW_ON_ERROR );
     }
 
-    private function error( string $section, string $name ): void {
-        // Never include the submitted value, ciphertext, or exception message in admin notices.
+    private function error( string $section, string $name, \Throwable $error ): void {
+        // Only fixed messages for known reasons. Never expose arbitrary exception messages.
+        $reason = __( 'Encryption failed. Check the server configuration.', 'wedevs-secure-settings' );
+        if ( $error instanceof Configuration_Exception ) {
+            if ( Configuration_Exception::INVALID_KEY === $error->getCode() ) {
+                $reason = __( 'WSA_SETTINGS_SECRET_KEY is missing or invalid. Configure a base64-encoded 32-byte encryption key in wp-config.php. If using getenv(), the environment variable must be available to the PHP process serving WordPress.', 'wedevs-secure-settings' );
+            } elseif ( Configuration_Exception::MISSING_SODIUM === $error->getCode() ) {
+                $reason = __( 'PHP Sodium encryption is unavailable. Enable Sodium for the PHP process serving WordPress.', 'wedevs-secure-settings' );
+            }
+        } elseif ( $error instanceof \InvalidArgumentException ) {
+            switch ( $error->getCode() ) {
+                case self::INVALID_INPUT:
+                    $reason = __( 'Invalid credential submission. Use the secret field renderer; a replacement must be submitted as field[value].', 'wedevs-secure-settings' );
+                    break;
+                case self::TOO_LONG:
+                    $reason = __( 'The credential exceeds the 4096-byte limit.', 'wedevs-secure-settings' );
+                    break;
+                case self::CONFLICTING_ACTIONS:
+                    $reason = __( 'Uncheck Delete saved credential when entering a replacement.', 'wedevs-secure-settings' );
+                    break;
+            }
+        }
         add_settings_error(
             $section, 'wsa_secret_' . $name,
-            sprintf( __( 'Could not update credential "%s". Its previous value was kept. Check the encryption configuration and submit either a new value or deletion.', 'wedevs-secure-settings' ), $name )
+            sprintf( __( 'Could not update credential "%s". Its previous value was kept.', 'wedevs-secure-settings' ), esc_html( $name ) ) . ' ' . $reason
         );
     }
 
@@ -89,7 +113,7 @@ class Settings_API extends \WeDevs_Settings_API {
                 $output[ $name ] = $this->sanitize_secret( $input[ $name ], $old[ $name ] ?? '', $context );
                 $this->accepted[ $context ][ $output[ $name ] ] = true;
             } catch ( \Throwable $error ) {
-                $this->error( $section, $name );
+                $this->error( $section, $name, $error );
             }
         }
         return $output;
@@ -105,16 +129,19 @@ class Settings_API extends \WeDevs_Settings_API {
             return $input;
         }
         if ( ! is_array( $input ) || array_diff( array_keys( $input ), array( 'value', 'delete' ) ) ) {
-            throw new \InvalidArgumentException( 'Invalid credential submission.' );
+            throw new \InvalidArgumentException( 'Invalid credential submission.', self::INVALID_INPUT );
         }
         $value = $input['value'] ?? '';
         $delete = $input['delete'] ?? '0';
-        if ( ! is_string( $value ) || ! in_array( $delete, array( '0', '1' ), true ) || strlen( $value ) > 4096 ) {
-            throw new \InvalidArgumentException( 'Invalid credential submission.' );
+        if ( ! is_string( $value ) || ! in_array( $delete, array( '0', '1' ), true ) ) {
+            throw new \InvalidArgumentException( 'Invalid credential submission.', self::INVALID_INPUT );
+        }
+        if ( strlen( $value ) > 4096 ) {
+            throw new \InvalidArgumentException( 'Credential too long.', self::TOO_LONG );
         }
         if ( '1' === $delete ) {
             if ( '' !== $value ) {
-                throw new \InvalidArgumentException( 'Choose replacement or deletion.' );
+                throw new \InvalidArgumentException( 'Choose replacement or deletion.', self::CONFLICTING_ACTIONS );
             }
             return '';
         }

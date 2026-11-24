@@ -2,6 +2,12 @@
 
 namespace WeDevsSecureSettings;
 
+/** Stable configuration reasons; callers must not display arbitrary exception messages. */
+final class Configuration_Exception extends \RuntimeException {
+    public const MISSING_SODIUM = 1;
+    public const INVALID_KEY = 2;
+}
+
 /** Authenticated encryption for recoverable service credentials. */
 final class Secret_Cipher {
     private const PREFIX = 'wsa-secret:v1:';
@@ -18,12 +24,12 @@ final class Secret_Cipher {
 
     private function key(): string {
         if ( ! function_exists( 'sodium_crypto_aead_xchacha20poly1305_ietf_encrypt' ) ) {
-            throw new \RuntimeException( 'The PHP Sodium extension is required.' );
+            throw new Configuration_Exception( 'The PHP Sodium extension is required.', Configuration_Exception::MISSING_SODIUM );
         }
         $encoded = call_user_func( $this->key_provider );
         $key = is_string( $encoded ) ? base64_decode( $encoded, true ) : false;
         if ( false === $key || 32 !== strlen( $key ) ) {
-            throw new \RuntimeException( 'Configure a valid WSA_SETTINGS_SECRET_KEY.' );
+            throw new Configuration_Exception( 'Configure a valid WSA_SETTINGS_SECRET_KEY.', Configuration_Exception::INVALID_KEY );
         }
         return $key;
     }

@@ -79,6 +79,8 @@ require dirname( __DIR__ ) . '/src/Settings_API.php';
 use WeDevsSecureSettings\Secret_Cipher;
 use WeDevsSecureSettings\Settings_API;
 
+throws( fn() => ( new Secret_Cipher() )->encrypt( 'test', 'context' ), 'Default provider rejects missing configuration' );
+
 $key = base64_encode( random_bytes( 32 ) );
 $cipher = new Secret_Cipher( static function () use ( &$key ) { return $key; } );
 $secret = '  test-credential+%2F<>&"\'\\tail  ';
@@ -138,9 +140,15 @@ foreach ( array( 'raw-plaintext', 'wsa-secret:v1:pretend', array( 'value' => arr
     update_option( 'service', array( 'key' => $bad ) );
     check( $saved['key'] === get_option( 'service' )['key'] && count( $errors ) === $before_errors + 1, 'Invalid input preserves credential and reports error' );
 }
+check( str_contains( end( $errors ), 'field[value]' ), 'Malformed input notice identifies expected submission shape' );
+update_option( 'service', array( 'key' => array( 'value' => 'replacement', 'delete' => '1' ) ) );
+check( str_contains( end( $errors ), 'Uncheck Delete saved credential' ), 'Conflicting action notice explains how to replace' );
+update_option( 'service', array( 'key' => array( 'value' => str_repeat( 'x', 4097 ) ) ) );
+check( str_contains( end( $errors ), '4096-byte limit' ), 'Oversize input notice explains limit' );
 $key = '';
 update_option( 'service', array( 'key' => array( 'value' => 'replacement' ) ) );
 check( $saved['key'] === get_option( 'service' )['key'], 'Failed encryption preserves old credential' );
+check( str_contains( end( $errors ), 'WSA_SETTINGS_SECRET_KEY is missing or invalid' ), 'Missing key notice explains configuration failure' );
 check( $api->get_secret( 'key', 'service' ) instanceof WP_Error, 'Missing key returns error' );
 $key = $correct_key;
 
@@ -179,5 +187,19 @@ check( $api->get_secret( 'key', 'service' ) instanceof WP_Error, 'Legacy plainte
 update_option( 'service', array( 'key' => array( 'value' => 'migrated-credential' ) ) );
 check( 'migrated-credential' === $api->get_secret( 'key', 'service' ), 'Explicit replacement migrates legacy value' );
 check( ! str_contains( implode( '\n', $errors ), $secret ), 'Errors do not expose credentials' );
+
+// Exercise the default wp-config.php constant provider as well as the injected test provider.
+define( 'WSA_SETTINGS_SECRET_KEY', $correct_key );
+$default_cipher = new Secret_Cipher();
+check( 'configured' === $default_cipher->decrypt( $default_cipher->encrypt( 'configured', 'default' ), 'default' ), 'Default provider reads configured global constant' );
+
+// An unexpected provider exception must never leak its message into an admin notice.
+$failing_api = new Settings_API( new Secret_Cipher( static function () use ( $secret ) {
+    throw new RuntimeException( $secret );
+} ) );
+$failing_api->set_fields( array( 'isolated' => $fields ) );
+register_setting( 'isolated', 'isolated', array( $failing_api, 'sanitize_options' ) );
+update_option( 'isolated', array( 'key' => array( 'value' => 'replacement' ) ) );
+check( str_contains( end( $errors ), 'Encryption failed.' ) && ! str_contains( end( $errors ), $secret ), 'Unknown exceptions use safe generic notice' );
 
 echo "PASS: {$assertions} assertions (real upstream class; WordPress APIs stubbed).\n";
